@@ -7,67 +7,59 @@ import (
 	"sync"
 )
 
-type unitTask struct {
-	task  func(param interface{})
-	param interface{}
-}
-
 type worker struct {
-	pool    *ConPool
-	trigger chan *unitTask
+	pool *ConPool
+	pipe chan *task
 }
 
-func getChanCap() int {
-	// Use blocking channel if GOMAXPROCS=1.
+func _getChanCap() int {
 	if runtime.GOMAXPROCS(0) == 1 {
 		return 0
 	}
-	// Use non-blocking channel if GOMAXPROCS>1,
 	return 1
 }
 
-var workerCache = sync.Pool{
+var _workerCache = sync.Pool{
 	New: func() interface{} {
 		return &worker{
-			trigger: make(chan *unitTask, getChanCap()),
+			pipe: make(chan *task, _getChanCap()),
 		}
 	},
 }
 
-var taskCache = sync.Pool{
-	New: func() interface{} {
-		return &unitTask{
-			task:  nil,
-			param: nil,
-		}
-	},
+func allocWorker() *worker {
+	w, _ := _workerCache.Get().(*worker)
+	go w.run()
+	return w
+}
+
+func freeWorker(w *worker) {
+	w.pool = nil
+	_workerCache.Put(w)
 }
 
 func (w *worker) run() {
-	go func() {
-		// panic handling
-		defer func() {
-			if w.pool.PanicHandler != nil {
-				if r := recover(); r != nil {
-					w.pool.PanicHandler(r)
-				}
+	defer func() {
+		if w.pool.panicHandler != nil {
+			// panic handling
+			if r := recover(); r != nil {
+				w.pool.panicHandler(r)
 			}
-
-			w.pool = nil
-			workerCache.Put(w)
-		}()
-
-		for u := range w.trigger {
-			if u == nil {
-				return
-			}
-
-			task := u.task
-			param := u.param
-			taskCache.Put(u)
-			// task can cause panic
-			task(param)
-			w.pool.freeWorker(w)
 		}
+		freeWorker(w)
 	}()
+
+	for t := range w.pipe {
+		if t == nil {
+			// stop worker
+			return
+		}
+
+		task := t.t
+		params := t.p
+		freeTask(t)
+
+		task(params...)
+		w.pool.done(w)
+	}
 }
